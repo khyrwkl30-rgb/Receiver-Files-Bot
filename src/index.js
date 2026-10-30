@@ -1,643 +1,415 @@
-// Receiver Files Bot - Cloudflare Worker
-// Required: D1 binding DB
-// Secrets: BOT_TOKEN, ADMIN_ID, WEBHOOK_SECRET
-// Optional variable: PAYMENT_NUMBER
-
-const html = `<!doctype html>
-<html lang="ar" dir="rtl">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>طلب ملفات الرسيفر</title>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
-<style>
-*{box-sizing:border-box}
-body{margin:0;padding:22px;font-family:Arial,sans-serif;background:var(--tg-theme-bg-color,#111);color:var(--tg-theme-text-color,#fff)}
-.card{max-width:520px;margin:auto;background:var(--tg-theme-secondary-bg-color,#222);padding:20px;border-radius:18px}
-h2{margin-top:0}
-label{display:block;margin:17px 0 8px}
-select,input{width:100%;padding:14px;border-radius:10px;border:1px solid #777;background:var(--tg-theme-bg-color,#111);color:var(--tg-theme-text-color,#fff);font-size:16px}
-button{width:100%;padding:15px;border:0;border-radius:12px;background:var(--tg-theme-button-color,#2481cc);color:var(--tg-theme-button-text-color,#fff);font-size:17px;margin-top:20px}
-small{opacity:.75}
-.status{margin-top:15px;line-height:1.7}
-</style>
-</head>
-<body>
-<div class="card">
-<h2>📡 متجر ملفات الرسيفر</h2>
-<p>املأ البيانات وارفع صورة معلومات الجهاز، وسيصلك السعر بعد مراجعة الطلب.</p>
-<form id="f">
-<label>نوع الطلب</label>
-<select id="service" required>
-<option value="">اختر نوع الخدمة</option>
-<option value="سوفت">سوفت رسيفر</option>
-<option value="ملف قنوات">ملف قنوات</option>
-</select>
-<label>موديل الرسيفر</label>
-<input id="model" maxlength="100" placeholder="مثال: Tiger T3000" required>
-<label>صورة معلومات الجهاز</label>
-<input id="photo" type="file" accept="image/jpeg,image/png,image/webp" required>
-<small>صورة واضحة من صفحة معلومات الجهاز (بحد أقصى 5 ميجابايت).</small>
-<button id="send" type="submit">إرسال الطلب</button>
-<div class="status" id="status"></div>
-</form>
-</div>
-<script>
-const tg=window.Telegram.WebApp;
-tg.ready();
-tg.expand();
-
-const form=document.getElementById('f');
-const statusEl=document.getElementById('status');
-const btn=document.getElementById('send');
-
-form.addEventListener('submit',async e=>{
- e.preventDefault();
- const file=document.getElementById('photo').files[0];
-
- if(!tg.initData){
-  statusEl.textContent='افتح الصفحة من زر البوت داخل تيليجرام.';
-  return;
- }
- if(!file){
-  statusEl.textContent='اختر صورة معلومات الجهاز.';
-  return;
- }
- if(file.size>5*1024*1024){
-  statusEl.textContent='حجم الصورة أكبر من 5 ميجابايت.';
-  return;
- }
-
- btn.disabled=true;
- statusEl.textContent='جارٍ إرسال الطلب...';
-
- try{
-  const dataUrl=await new Promise((resolve,reject)=>{
-   const r=new FileReader();
-   r.onload=()=>resolve(r.result);
-   r.onerror=reject;
-   r.readAsDataURL(file);
-  });
-
-  const res=await fetch('/api/order',{
-   method:'POST',
-   headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({
-    initData:tg.initData,
-    service:document.getElementById('service').value,
-    model:document.getElementById('model').value.trim(),
-    image:dataUrl
-   })
-  });
-
-  const out=await res.json();
-  if(!res.ok) throw new Error(out.error||'تعذر إرسال الطلب');
-
-  statusEl.textContent='✅ تم إرسال طلبك بنجاح. رقم الطلب: '+out.id;
-  tg.HapticFeedback?.notificationOccurred('success');
-
- }catch(err){
-  statusEl.textContent='❌ '+err.message;
-  btn.disabled=false;
- }
-});
-</script>
-</body>
-</html>`;
-
-async function tg(env, method, body) {
-  const r = await fetch(
-    `https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`,
-    {
-      method: "POST",
-      headers: {"content-type": "application/json"},
-      body: JSON.stringify(body)
-    }
-  );
-
-  const data = await r.json();
-
-  if (!data.ok) {
-    throw new Error(data.description || "Telegram API error");
-  }
-
-  return data.result;
-}
-
-async function sendText(env, chat_id, text, extra = {}) {
-  return tg(env, "sendMessage", {chat_id, text, ...extra});
-}
-
-async function verifyInitData(initData, botToken) {
-  const params = new URLSearchParams(initData);
-  const hash = params.get("hash");
-
-  if (!hash) return null;
-
-  params.delete("hash");
-
-  const pairs = [...params.entries()].sort(([a],[b]) => a.localeCompare(b));
-  const check = pairs.map(([k,v]) => `${k}=${v}`).join("\n");
-
-  const enc = new TextEncoder();
-
-  const key1 = await crypto.subtle.importKey(
-    "raw",
-    enc.encode("WebAppData"),
-    {name:"HMAC",hash:"SHA-256"},
-    false,
-    ["sign"]
-  );
-
-  const secret = await crypto.subtle.sign(
-    "HMAC",
-    key1,
-    enc.encode(botToken)
-  );
-
-  const key2 = await crypto.subtle.importKey(
-    "raw",
-    secret,
-    {name:"HMAC",hash:"SHA-256"},
-    false,
-    ["sign"]
-  );
-
-  const digest = await crypto.subtle.sign(
-    "HMAC",
-    key2,
-    enc.encode(check)
-  );
-
-  const actual = [...new Uint8Array(digest)]
-    .map(b=>b.toString(16).padStart(2,"0"))
-    .join("");
-
-  if (actual !== hash) return null;
-
-  const authDate = Number(params.get("auth_date") || 0);
-
-  if (!authDate || Date.now()/1000 - authDate > 86400) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(params.get("user") || "null");
-  } catch {
-    return null;
-  }
-}
-
-function json(data, status=200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {"content-type":"application/json; charset=utf-8"}
-  });
-}
-
-function isAdmin(update, env) {
-  const from =
-    update.callback_query?.from?.id ??
-    update.message?.from?.id;
-
-  return String(from) === String(env.ADMIN_ID);
-}
-
-async function handleUpdate(update, env, requestUrl) {
-  const msg = update.message;
-  const cb = update.callback_query;
-
-  if (cb) {
-    const [action,id] = (cb.data || "").split("|");
-
-    const req = await env.DB
-      .prepare("SELECT * FROM requests WHERE id=?")
-      .bind(id)
-      .first();
-
-    if (!req) {
-      await tg(env,"answerCallbackQuery",{
-        callback_query_id:cb.id,
-        text:"الطلب غير موجود"
-      });
-      return;
-    }
-
-    // موافقة العميل أو إلغاء السعر
-    if (action === "accept" || action === "decline") {
-      if (String(cb.from.id) !== String(req.chat_id)) {
-        await tg(env,"answerCallbackQuery",{
-          callback_query_id:cb.id,
-          text:"هذا الزر ليس خاصًا بك",
-          show_alert:true
-        });
-        return;
-      }
-
-      if (action === "accept") {
-        await env.DB
-          .prepare("UPDATE requests SET status='awaiting_payment' WHERE id=?")
-          .bind(id)
-          .run();
-
-        await sendText(
-          env,
-          req.chat_id,
-          `تمام، حوّل ${req.price} جنيه إلى: ${env.PAYMENT_NUMBER || "تواصل مع الإدارة لمعرفة رقم التحويل"}\nبعد التحويل أرسل صورة الإيصال هنا.`
-        );
-
-        await tg(env,"answerCallbackQuery",{
-          callback_query_id:cb.id,
-          text:"تم قبول السعر"
-        });
-
-      } else {
-        await env.DB
-          .prepare("UPDATE requests SET status='declined' WHERE id=?")
-          .bind(id)
-          .run();
-
-        await sendText(
-          env,
-          req.chat_id,
-          "تم إلغاء الطلب. يمكنك إرسال طلب جديد في أي وقت."
-        );
-
-        await tg(env,"answerCallbackQuery",{
-          callback_query_id:cb.id,
-          text:"تم إلغاء الطلب"
-        });
-      }
-
-      return;
-    }
-
-    // أزرار المدير فقط
-    if (!isAdmin(update, env)) {
-      await tg(env,"answerCallbackQuery",{
-        callback_query_id:cb.id,
-        text:"غير مصرح",
-        show_alert:true
-      });
-      return;
-    }
-
-    if (action === "price") {
-      await env.DB
-        .prepare("INSERT OR REPLACE INTO admin_state(admin_id,action,request_id) VALUES(?,?,?)")
-        .bind(String(env.ADMIN_ID),"price",id)
-        .run();
-
-      await sendText(
-        env,
-        env.ADMIN_ID,
-        `اكتب السعر للطلب #${id} في رسالة واحدة (بالجنيه).`
-      );
-
-    } else if (action === "paid") {
-      await env.DB
-        .prepare("UPDATE requests SET status='paid' WHERE id=?")
-        .bind(id)
-        .run();
-
-      await sendText(
-        env,
-        req.chat_id,
-        `✅ تم تأكيد وصول الدفع لطلبك رقم #${id}. جاري تجهيز الملف.`
-      );
-
-      await sendText(
-        env,
-        env.ADMIN_ID,
-        `تم تأكيد الدفع للطلب #${id}. اضغط «إرسال الملف» بعد مراجعة التحويل.`
-      );
-
-    } else if (action === "file") {
-      await env.DB
-        .prepare("INSERT OR REPLACE INTO admin_state(admin_id,action,request_id) VALUES(?,?,?)")
-        .bind(String(env.ADMIN_ID),"file",id)
-        .run();
-
-      await sendText(
-        env,
-        env.ADMIN_ID,
-        `ابعت الملف الآن كـ Document للطلب #${id}.`
-      );
-    }
-
-    await tg(env,"answerCallbackQuery",{
-      callback_query_id:cb.id,
-      text:"تم"
-    });
-
-    return;
-  }
-
-  if (!msg) return;
-
-  // رسائل المدير
-  if (String(msg.from?.id) === String(env.ADMIN_ID)) {
-    const state = await env.DB
-      .prepare("SELECT * FROM admin_state WHERE admin_id=?")
-      .bind(String(env.ADMIN_ID))
-      .first();
-
-    // المدير يكتب السعر
-    if (state?.action === "price" && msg.text && !msg.text.startsWith("/")) {
-      const price = Number(msg.text.replace(/[^\d.]/g,""));
-
-      if (!Number.isFinite(price) || price <= 0) {
-        await sendText(env,env.ADMIN_ID,"اكتب سعرًا صحيحًا بالأرقام.");
-        return;
-      }
-
-      const req = await env.DB
-        .prepare("SELECT * FROM requests WHERE id=?")
-        .bind(state.request_id)
-        .first();
-
-      if (!req) {
-        await sendText(env,env.ADMIN_ID,"الطلب غير موجود.");
-        return;
-      }
-
-      await env.DB
-        .prepare("UPDATE requests SET price=?,status='awaiting_payment' WHERE id=?")
-        .bind(String(price),state.request_id)
-        .run();
-
-      await env.DB
-        .prepare("DELETE FROM admin_state WHERE admin_id=?")
-        .bind(String(env.ADMIN_ID))
-        .run();
-
-      await sendText(
-        env,
-        req.chat_id,
-        `💰 سعر طلبك رقم #${req.id} هو ${price} جنيه. هل توافق على السعر؟`,
-        {
-          reply_markup:{
-            inline_keyboard:[[
-              {text:"✅ موافق",callback_data:`accept|${req.id}`},
-              {text:"❌ إلغاء",callback_data:`decline|${req.id}`}
-            ]]
-          }
-        }
-      );
-
-      await sendText(
-        env,
-        env.ADMIN_ID,
-        "تم إرسال السعر للعميل. بعد موافقته وتحويله، راجع الإيصال ثم اضغط «تأكيد الدفع» وبعدها «إرسال الملف»."
-      );
-
-      return;
-    }
-
-    // المدير يرسل الملف
-    if (state?.action === "file" && msg.document) {
-      const req = await env.DB
-        .prepare("SELECT * FROM requests WHERE id=?")
-        .bind(state.request_id)
-        .first();
-
-      if (!req) {
-        await sendText(env,env.ADMIN_ID,"الطلب غير موجود.");
-        return;
-      }
-
-      await tg(env,"sendDocument",{
-        chat_id:req.chat_id,
-        document:msg.document.file_id,
-        caption:`✅ تم تسليم ملف طلبك رقم #${req.id}. شكرًا لثقتك بنا.`
-      });
-
-      await env.DB
-        .prepare("UPDATE requests SET status='delivered' WHERE id=?")
-        .bind(state.request_id)
-        .run();
-
-      await env.DB
-        .prepare("DELETE FROM admin_state WHERE admin_id=?")
-        .bind(String(env.ADMIN_ID))
-        .run();
-
-      await sendText(
-        env,
-        env.ADMIN_ID,
-        `✅ تم تسليم الملف للعميل للطلب #${req.id}.`
-      );
-
-      return;
-    }
-  }
-
-  // بداية البوت
-  if (msg.text?.startsWith("/start")) {
-    const url = new URL("/app",requestUrl).toString();
-
-    await sendText(
-      env,
-      msg.chat.id,
-      "أهلًا بك في متجر ملفات الرسيفر 📡\nاضغط الزر لطلب سوفت أو ملف قنوات.",
-      {
-        reply_markup:{
-          inline_keyboard:[[
-            {
-              text:"🛒 ابدأ طلب جديد",
-              web_app:{url}
-            }
-          ]]
-        }
-      }
-    );
-
-    return;
-  }
-
-  // تحويل صورة إيصال العميل للمدير للمراجعة اليدوية
-  if (msg.photo && String(msg.from?.id) !== String(env.ADMIN_ID)) {
-    await sendText(
-      env,
-      env.ADMIN_ID,
-      `📥 وصلت صورة من العميل ${msg.from.id}. راجعها يدويًا من المحادثة.`
-    );
-
-    await tg(env,"forwardMessage",{
-      chat_id:env.ADMIN_ID,
-      from_chat_id:msg.chat.id,
-      message_id:msg.message_id
-    });
-  }
-}
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // صفحة الطلب
-    if (
-      request.method === "GET" &&
-      (url.pathname === "/" || url.pathname === "/app")
-    ) {
-      return new Response(html,{
-        headers:{"content-type":"text/html; charset=utf-8"}
-      });
-    }
-
-    if (request.method === "GET" && url.pathname === "/health") {
-      return new Response("OK");
-    }
-
-    // استقبال طلب جديد
-    if (request.method === "POST" && url.pathname === "/api/order") {
-      try {
-        const body = await request.json();
-
-        const user = await verifyInitData(
-          body.initData || "",
-          env.BOT_TOKEN
-        );
-
-        if (!user?.id) {
-          return json({
-            error:"تعذر التحقق من حساب تيليجرام. افتح النموذج من البوت."
-          },401);
-        }
-
-        const service = String(body.service || "");
-        const model = String(body.model || "").trim();
-
-        if (
-          !["سوفت","ملف قنوات"].includes(service) ||
-          !model ||
-          model.length > 100
-        ) {
-          return json({
-            error:"راجع نوع الطلب وموديل الرسيفر."
-          },400);
-        }
-
-        const match = String(body.image || "").match(
-          /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/
-        );
-
-        if (!match) {
-          return json({
-            error:"الصورة غير صالحة. ارفع JPG أو PNG أو WEBP."
-          },400);
-        }
-
-        const bytes = Uint8Array.from(
-          atob(match[2]),
-          c=>c.charCodeAt(0)
-        );
-
-        if (bytes.length > 5*1024*1024) {
-          return json({
-            error:"الصورة أكبر من 5 ميجابايت."
-          },400);
-        }
-
-        const id = crypto.randomUUID().slice(0,8).toUpperCase();
-
-        await env.DB
-          .prepare("INSERT INTO requests(id,chat_id,service,model,status,created_at) VALUES(?,?,?,?,?,?)")
-          .bind(
-            id,
-            String(user.id),
-            service,
-            model,
-            "new",
-            new Date().toISOString()
-          )
-          .run();
-
-        const form = new FormData();
-
-        form.append("chat_id",String(env.ADMIN_ID));
-        form.append(
-          "photo",
-          new Blob([bytes],{type:match[1]}),
-          "receiver-info"
-        );
-
-        form.append(
-          "caption",
-          `📥 طلب جديد #${id}\nالعميل: ${user.first_name || ""} (@${user.username || "بدون"})\nID: ${user.id}\nالخدمة: ${service}\nموديل الرسيفر: ${model}`
-        );
-
-        form.append(
-          "reply_markup",
-          JSON.stringify({
-            inline_keyboard:[
-              [
-                {text:"💰 تحديد السعر",callback_data:`price|${id}`},
-                {text:"✅ تأكيد الدفع",callback_data:`paid|${id}`}
-              ],
-              [
-                {text:"📤 إرسال الملف",callback_data:`file|${id}`}
-              ]
-            ]
-          })
-        );
-
-        const sent = await fetch(
-          `https://api.telegram.org/bot${env.BOT_TOKEN}/sendPhoto`,
-          {
-            method:"POST",
-            body:form
-          }
-        );
-
-        const result = await sent.json();
-
-        if (!result.ok) {
-          throw new Error(
-            result.description || "فشل إرسال الطلب للإدارة"
-          );
-        }
-
-        await sendText(
-          env,
-          String(user.id),
-          `تم استلام طلبك رقم #${id} بنجاح. سنراجع البيانات ونرسل لك السعر قريبًا.`
-        );
-
-        return json({ok:true,id});
-
-      } catch(e) {
-        return json({
-          error:e.message || "حدث خطأ غير متوقع."
-        },500);
-      }
-    }
-
-    // Webhook تيليجرام
-    if (request.method === "POST" && url.pathname === "/webhook") {
+    if (url.pathname === "/webhook" && request.method === "POST") {
       if (
         request.headers.get("X-Telegram-Bot-Api-Secret-Token") !==
         env.WEBHOOK_SECRET
       ) {
-        return new Response("Forbidden",{status:403});
+        return new Response("Unauthorized", { status: 401 });
       }
 
       try {
-        await handleUpdate(
-          await request.json(),
-          env,
-          url.origin
-        );
-
+        const update = await request.json();
+        await handleUpdate(update, env);
         return new Response("OK");
-
-      } catch(e) {
-        return new Response("Webhook error: "+e.message,{
-          status:500
-        });
+      } catch (error) {
+        console.error("Bot error:", error);
+        return new Response("Internal error", { status: 500 });
       }
     }
 
-    return new Response("Not found",{status:404});
+    return new Response("Receiver Files Store is running");
   }
 };
+
+async function tg(env, method, data) {
+  const response = await fetch(
+    `https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data)
+    }
+  );
+
+  const result = await response.json();
+
+  if (!result.ok) {
+    console.error("Telegram API error:", method, result);
+  }
+
+  return result;
+}
+
+async function say(env, chatId, text, keyboard) {
+  return tg(env, "sendMessage", {
+    chat_id: chatId,
+    text,
+    ...(keyboard ? { reply_markup: keyboard } : {})
+  });
+}
+
+async function answer(env, callbackId, text = "") {
+  return tg(env, "answerCallbackQuery", {
+    callback_query_id: callbackId,
+    ...(text ? { text } : {})
+  });
+}
+
+async function getRequest(env, id) {
+  return env.DB.prepare(
+    "SELECT * FROM requests WHERE id = ?"
+  ).bind(id).first();
+}
+
+async function setAdminState(env, adminId, action, requestId) {
+  return env.DB.prepare(
+    `INSERT OR REPLACE INTO admin_state
+     (admin_id, action, request_id) VALUES (?, ?, ?)`
+  ).bind(adminId, action, requestId).run();
+}
+
+async function clearAdminState(env, adminId) {
+  return env.DB.prepare(
+    "DELETE FROM admin_state WHERE admin_id = ?"
+  ).bind(adminId).run();
+}
+
+async function handleUpdate(update, env) {
+  const adminId = String(env.ADMIN_ID);
+
+  if (update.callback_query) {
+    await handleCallback(update.callback_query, env, adminId);
+    return;
+  }
+
+  const message = update.message;
+  if (!message) return;
+
+  const chatId = String(message.chat.id);
+  const isAdmin = chatId === adminId;
+
+  // أوامر البداية
+  if (message.text === "/start") {
+    if (isAdmin) {
+      await say(env, chatId, "لوحة الإدارة جاهزة. الطلبات الجديدة ستصلك هنا.");
+    } else {
+      await say(
+        env,
+        chatId,
+        "أهلاً بك في متجر ملفات الرسيفر ❤️\nاختار الخدمة المطلوبة:",
+        {
+          inline_keyboard: [
+            [{ text: "سوفت وير", callback_data: "service|software" }],
+            [{ text: "ملف قنوات", callback_data: "service|channels" }]
+          ]
+        }
+      );
+    }
+    return;
+  }
+
+  // استقبال سعر من الإدارة
+  if (isAdmin && message.text) {
+    const state = await env.DB.prepare(
+      "SELECT action, request_id FROM admin_state WHERE admin_id = ?"
+    ).bind(adminId).first();
+
+    if (state?.action === "price") {
+      const price = Number(message.text.trim());
+
+      if (!Number.isFinite(price) || price <= 0) {
+        await say(env, adminId, "اكتب سعرًا صحيحًا بالأرقام.");
+        return;
+      }
+
+      const order = await getRequest(env, state.request_id);
+
+      if (!order || order.status !== "new") {
+        await clearAdminState(env, adminId);
+        await say(env, adminId, "الطلب غير موجود أو لم يعد في انتظار السعر.");
+        return;
+      }
+
+      await env.DB.prepare(
+        "UPDATE requests SET price = ?, status = 'priced' WHERE id = ?"
+      ).bind(price, state.request_id).run();
+
+      await clearAdminState(env, adminId);
+
+      await say(
+        env,
+        order.chat_id,
+        `تم تحديد سعر طلبك: ${price} جنيه.\nهل توافق على السعر؟`,
+        {
+          inline_keyboard: [[
+            { text: "أوافق على السعر", callback_data: `accept|${state.request_id}` },
+            { text: "أرفض السعر", callback_data: `decline|${state.request_id}` }
+          ]]
+        }
+      );
+
+      await say(env, adminId, "تم إرسال السعر للعميل.");
+      return;
+    }
+
+    if (state?.action === "file") {
+      await say(env, adminId, "ارفع الملف كـ Document، وليس كنص.");
+      return;
+    }
+  }
+
+  // الإدارة ترفع الملف بعد تأكيد الدفع
+  if (isAdmin && message.document) {
+    const state = await env.DB.prepare(
+      "SELECT action, request_id FROM admin_state WHERE admin_id = ?"
+    ).bind(adminId).first();
+
+    if (state?.action === "file") {
+      const order = await getRequest(env, state.request_id);
+
+      if (!order || order.status !== "awaiting_file") {
+        await clearAdminState(env, adminId);
+        await say(env, adminId, "الطلب غير موجود أو ليس في انتظار الملف.");
+        return;
+      }
+
+      const sent = await tg(env, "sendDocument", {
+        chat_id: order.chat_id,
+        document: message.document.file_id,
+        caption: "تم تأكيد الدفع وإرسال الملف. شكرًا لطلبك ❤️"
+      });
+
+      if (sent.ok) {
+        await env.DB.prepare(
+          "UPDATE requests SET status = 'completed', file_id = ? WHERE id = ?"
+        ).bind(message.document.file_id, state.request_id).run();
+
+        await clearAdminState(env, adminId);
+        await say(env, adminId, "تم إرسال الملف للعميل بنجاح.");
+      } else {
+        await say(env, adminId, "لم ينجح إرسال الملف. حاول رفعه مرة أخرى.");
+      }
+      return;
+    }
+  }
+
+  // استقبال صورة من العميل
+  if (!isAdmin && message.photo) {
+    const photo = message.photo[message.photo.length - 1].file_id;
+
+    // هل العميل أرسل إيصال تحويل؟
+    const receiptOrder = await env.DB.prepare(
+      `SELECT * FROM requests
+       WHERE chat_id = ? AND status = 'accepted'
+       ORDER BY created_at DESC LIMIT 1`
+    ).bind(chatId).first();
+
+    if (receiptOrder) {
+      await env.DB.prepare(
+        "UPDATE requests SET receipt_id = ?, status = 'payment_review' WHERE id = ?"
+      ).bind(photo, receiptOrder.id).run();
+
+      await say(env, chatId, "وصل إيصال التحويل، وسيتم مراجعته من الإدارة.");
+
+      await tg(env, "sendPhoto", {
+        chat_id: adminId,
+        photo,
+        caption:
+          `إيصال تحويل للطلب ${receiptOrder.id}\n` +
+          `السعر: ${receiptOrder.price} جنيه\n` +
+          `راجع الإيصال قبل تأكيد الدفع.`,
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "تأكيد الدفع", callback_data: `confirm|${receiptOrder.id}` }],
+            [{ text: "رفض الإيصال", callback_data: `reject|${receiptOrder.id}` }]
+          ]
+        }
+      });
+      return;
+    }
+
+    // هل العميل أرسل صورة معلومات الرسيفر؟
+    const deviceOrder = await env.DB.prepare(
+      `SELECT * FROM requests
+       WHERE chat_id = ? AND status = 'waiting_photo'
+       ORDER BY created_at DESC LIMIT 1`
+    ).bind(chatId).first();
+
+    if (deviceOrder) {
+      await env.DB.prepare(
+        "UPDATE requests SET model = ?, status = 'new' WHERE id = ?"
+      ).bind(photo, deviceOrder.id).run();
+
+      await say(env, chatId, "وصلت صورة معلومات الرسيفر ❤️\nسيتم مراجعة طلبك وتحديد السعر.");
+
+      const serviceName =
+        deviceOrder.service === "software" ? "سوفت وير" : "ملف قنوات";
+
+      await say(
+        env,
+        adminId,
+        `طلب جديد رقم ${deviceOrder.id}\nالخدمة: ${serviceName}\nالعميل: ${chatId}`,
+        {
+          inline_keyboard: [[
+            { text: "تحديد السعر", callback_data: `price|${deviceOrder.id}` }
+          ]]
+        }
+      );
+
+      await tg(env, "sendPhoto", {
+        chat_id: adminId,
+        photo,
+        caption: `صورة معلومات الرسيفر للطلب ${deviceOrder.id}`
+      });
+      return;
+    }
+
+    await say(env, chatId, "ابدأ بالضغط على /start واختار الخدمة أولاً.");
+    return;
+  }
+
+  // التعامل مع أنواع رسائل غير متوقعة
+  if (!isAdmin && message.document) {
+    await say(env, chatId, "من فضلك أرسل صورة معلومات الرسيفر أو صورة إيصال التحويل حسب حالة طلبك.");
+  }
+}
+
+async function handleCallback(callback, env, adminId) {
+  const data = callback.data || "";
+  const chatId = String(callback.message.chat.id);
+  const isAdmin = chatId === adminId;
+  const [action, idOrService] = data.split("|");
+
+  await answer(env, callback.id);
+
+  // اختيار الخدمة من العميل
+  if (action === "service" && !isAdmin) {
+    if (!["software", "channels"].includes(idOrService)) return;
+
+    const existing = await env.DB.prepare(
+      `SELECT id FROM requests
+       WHERE chat_id = ? AND status IN
+       ('waiting_photo', 'new', 'priced', 'accepted', 'payment_review', 'awaiting_file')
+       LIMIT 1`
+    ).bind(chatId).first();
+
+    if (existing) {
+      await say(env, chatId, "لديك طلب قائم بالفعل. أكمل الطلب الحالي أولاً.");
+      return;
+    }
+
+    const id = crypto.randomUUID();
+
+    await env.DB.prepare(
+      `INSERT INTO requests
+       (id, chat_id, service, status, created_at)
+       VALUES (?, ?, ?, 'waiting_photo', ?)`
+    ).bind(id, chatId, idOrService, new Date().toISOString()).run();
+
+    await say(
+      env,
+      chatId,
+      "من فضلك أرسل صورة معلومات الرسيفر التي يظهر فيها الموديل والإصدار 📷"
+    );
+    return;
+  }
+
+  const requestId = idOrService;
+  const order = await getRequest(env, requestId);
+
+  if (!order) {
+    await say(env, chatId, "الطلب غير موجود.");
+    return;
+  }
+
+  // العميل يقبل السعر
+  if (action === "accept" && !isAdmin && String(order.chat_id) === chatId) {
+    if (order.status !== "priced") {
+      await say(env, chatId, "هذا العرض لم يعد متاحًا.");
+      return;
+    }
+
+    await env.DB.prepare(
+      "UPDATE requests SET status = 'accepted' WHERE id = ?"
+    ).bind(requestId).run();
+
+    await say(
+      env,
+      chatId,
+      `تم قبول السعر: ${order.price} جنيه.\n` +
+      `حوّل المبلغ إلى رقم الدفع التالي:\n${env.PAYMENT_NUMBER || "يرجى التواصل مع الإدارة لمعرفة رقم الدفع"}\n\n` +
+      "بعد التحويل، أرسل صورة إيصال التحويل هنا."
+    );
+
+    await say(env, adminId, `العميل قبل السعر للطلب ${requestId}.`);
+    return;
+  }
+
+  // العميل يرفض السعر
+  if (action === "decline" && !isAdmin && String(order.chat_id) === chatId) {
+    if (order.status !== "priced") return;
+
+    await env.DB.prepare(
+      "UPDATE requests SET status = 'declined' WHERE id = ?"
+    ).bind(requestId).run();
+
+    await say(env, chatId, "تم رفض السعر. شكرًا لك.");
+    await say(env, adminId, `العميل رفض السعر للطلب ${requestId}.`);
+    return;
+  }
+
+  // الإدارة تحدد السعر
+  if (action === "price" && isAdmin) {
+    if (order.status !== "new") {
+      await say(env, adminId, "هذا الطلب ليس في انتظار تحديد السعر.");
+      return;
+    }
+
+    await setAdminState(env, adminId, "price", requestId);
+    await say(env, adminId, `اكتب سعر الطلب ${requestId} بالجنيه.`);
+    return;
+  }
+
+  // الإدارة تؤكد استلام التحويل
+  if (action === "confirm" && isAdmin) {
+    if (order.status !== "payment_review") {
+      await say(env, adminId, "هذا الطلب ليس في انتظار مراجعة إيصال.");
+      return;
+    }
+
+    await env.DB.prepare(
+      "UPDATE requests SET status = 'awaiting_file' WHERE id = ?"
+    ).bind(requestId).run();
+
+    await setAdminState(env, adminId, "file", requestId);
+
+    await say(env, order.chat_id, "تم تأكيد الدفع بنجاح ❤️\nسيتم إرسال الملف إليك الآن.");
+    await say(env, adminId, `تم تأكيد الدفع للطلب ${requestId}.\nارفع الملف الآن كـ Document.`);
+    return;
+  }
+
+  // الإدارة ترفض الإيصال
+  if (action === "reject" && isAdmin) {
+    if (order.status !== "payment_review") {
+      await say(env, adminId, "هذا الطلب ليس في انتظار مراجعة إيصال.");
+      return;
+    }
+
+    await env.DB.prepare(
+      "UPDATE requests SET status = 'accepted', receipt_id = NULL WHERE id = ?"
+    ).bind(requestId).run();
+
+    await say(
+      env,
+      order.chat_id,
+      "تعذر تأكيد الإيصال. من فضلك راجع التحويل وأرسل صورة واضحة للإيصال مرة أخرى."
+    );
+
+    await say(env, adminId, `تم رفض إيصال الطلب ${requestId}.`);
+    return;
+  }
+}
