@@ -1,0 +1,8 @@
+name = "receiver-files-bot"
+main = "src/index.js"
+compatibility_date = "2026-10-30"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "receiver-files-db"
+database_id = "a1b0283b-40c4-465a-a692-a2f7b6573506"
